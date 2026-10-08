@@ -12,9 +12,11 @@ local playback:
 1. **The shared Web API app** keeps full catalogue and playlist coverage.
 2. **Your optional personal Web API app** handles supported playback, library,
    catalog, catalogue search, playlist creation, and owned or collaborative
-   playlist requests without using the shared app's quota. Complete
-   playlist-library views and the playlist half of a search stay on the shared
-   app so Spotify-owned results are not filtered out. Home's **Made for you**
+   playlist requests without using the shared app's quota. The playlist half
+   of a search stays on the shared app so Spotify-owned results are not filtered
+   out. When local playback is connected, the playlist library instead reads
+   the complete rootlist and playlist headers through that session. The shared
+   app remains a fallback when the session cannot answer. Home's **Made for you**
    shelf reads the account's actual personalized section over the playback
    session instead of performing four shared-app playlist searches. Both Web
    API grants must verify as the same Spotify account.
@@ -89,10 +91,17 @@ one-time introduction to that option. Setup and dismissal are remembered in
 settings. The prompt uses the existing account profile and adds no request.
 
 Since 0.8.0, explicitly sorting a Library section loads its remaining
-pages through the existing Web API grant, one at a time, while loaded entries
+pages one at a time, while loaded entries
 stay visible. A failed page stops automatic loading. Spotify custom playlist
 order uses the existing account-scoped rootlist from local playback; sorting
 and dragging never write that order back to Spotify.
+
+When local playback is connected, the playlist sidebar gets its entries from
+the rootlist and resolves each page's names and covers through the session.
+This avoids the shared Web API app's playlist-library quota and includes
+Spotify-owned playlists a personal app might omit. A failed session read falls
+back to the shared Web API app. Session headers may lack public visibility,
+owner display names or a generated cover mosaic that the Web API supplies.
 
 Since 0.9.0, a playlist-folder and invitation-permission read requested
 before local playback connects waits for that connection instead of being lost.

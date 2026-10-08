@@ -2079,8 +2079,16 @@ impl App {
     fn handle_playback(&mut self, status: LocalPlayback) {
         match &status {
             LocalPlayback::Ready { device_id } => {
+                let just_connected = !self.local_ready;
                 self.local_device_id = Some(device_id.clone());
                 self.local_ready = true;
+                // The first library request may have started before the
+                // playback session existed and be waiting on the shared app's
+                // cooldown. Replace it with a session-backed request now.
+                if just_connected && self.library.playlists.get().is_none() {
+                    self.library.playlists = Loadable::NotLoaded;
+                    self.load_playlists();
+                }
                 if self.home.requested && self.home.made_for_you.get().is_none() {
                     self.backend.api(ApiRequest::MadeForYou {
                         generation: self.home.generation,
@@ -21913,6 +21921,23 @@ mod tests {
             result: Ok(vec![]),
         });
         assert_eq!(app.home.made_for_you.get().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn playback_connection_retries_a_library_waiting_on_the_shared_app() {
+        let mut app = headless_app();
+        app.library.playlists = Loadable::Loading;
+        app.library.playlists_generation = 4;
+        app.local_ready = false;
+        app.handle_playback(LocalPlayback::Ready {
+            device_id: "local-test".into(),
+        });
+        assert!(app.library.playlists.is_loading());
+        assert_eq!(app.library.playlists_generation, 5);
+        app.handle_playback(LocalPlayback::Ready {
+            device_id: "local-test".into(),
+        });
+        assert_eq!(app.library.playlists_generation, 5);
     }
 
     #[test]
