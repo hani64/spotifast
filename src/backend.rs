@@ -2049,25 +2049,43 @@ impl Worker {
         if std::mem::replace(&mut self.spotify_restore_started, true) {
             return;
         }
-        self.restore_pending = [true; 3];
-        self.api
-            .set_state(ApiSource::Shared, SessionState::Authorizing);
+        self.restore_pending = [false; 3];
         if self.web_client_id.is_some() {
             self.api
                 .set_state(ApiSource::Personal, SessionState::Authorizing);
+            self.restore_grant(CredentialSlot::Personal);
+        } else {
+            self.api
+                .set_state(ApiSource::Shared, SessionState::Authorizing);
+            self.restore_grant(CredentialSlot::Shared);
         }
-        for slot in CredentialSlot::SPOTIFY {
-            let lease = self.credentials.lease(slot);
-            let commands = self.commands.clone();
-            tokio::spawn(async move {
-                let result = lease.load().await;
-                let _ = commands.send(Command::CredentialsRestored {
-                    slot,
-                    lease,
-                    result,
-                });
+        self.restore_grant(CredentialSlot::Playback);
+    }
+
+    fn restore_grant(&mut self, slot: CredentialSlot) {
+        self.restore_pending[slot.index()] = true;
+        let lease = self.credentials.lease(slot);
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let result = lease.load().await;
+            let _ = commands.send(Command::CredentialsRestored {
+                slot,
+                lease,
+                result,
             });
+        });
+    }
+
+    fn restore_shared_after_personal_failure(&mut self) {
+        if self.web_client_id.is_none()
+            || self.restore_pending[CredentialSlot::Shared.index()]
+            || !matches!(self.api.state(ApiSource::Shared), SessionState::Unavailable)
+        {
+            return;
         }
+        self.api
+            .set_state(ApiSource::Shared, SessionState::Authorizing);
+        self.restore_grant(CredentialSlot::Shared);
     }
 
     fn on_credentials_restored(
@@ -2136,6 +2154,9 @@ impl Worker {
             } else {
                 ApiSource::Personal
             });
+            if slot == CredentialSlot::Personal {
+                self.restore_shared_after_personal_failure();
+            }
         }
         if !self.restore_pending.iter().any(|pending| *pending)
             && !self.signed_in
@@ -2237,6 +2258,9 @@ impl Worker {
         } else {
             self.api.clear(source);
         }
+        if source == ApiSource::Personal {
+            self.restore_shared_after_personal_failure();
+        }
         let message = match source {
             ApiSource::Shared => format!("Shared Spotify sign-in failed: {error}"),
             ApiSource::Personal => format!("Personal app authorization failed: {error}"),
@@ -2248,7 +2272,9 @@ impl Worker {
                 SessionState::Ready { .. }
             ),
         };
-        if source == ApiSource::Shared || !other_ready {
+        let shared_fallback_pending =
+            source == ApiSource::Personal && self.restore_pending[CredentialSlot::Shared.index()];
+        if source == ApiSource::Shared || !other_ready && !shared_fallback_pending {
             self.signed_in = false;
             self.emit(Event::Auth(AuthStatus::Failed(message.clone())));
         }
@@ -2331,7 +2357,11 @@ impl Worker {
     }
 
     fn sign_in(&mut self) {
-        self.sign_in_source(ApiSource::Shared);
+        self.sign_in_source(if self.web_client_id.is_some() {
+            ApiSource::Personal
+        } else {
+            ApiSource::Shared
+        });
     }
 
     fn sign_in_source(&mut self, source: ApiSource) {
@@ -3266,6 +3296,7 @@ impl Worker {
     fn dispatch(&self, request: ApiRequest) -> tokio::task::AbortHandle {
         let api = Arc::clone(&self.api);
         let made_for_you = Arc::clone(&self.made_for_you);
+        let http = self.http.clone();
         let shared_lease = self.credentials.lease(CredentialSlot::Shared);
         let personal_lease = self.credentials.lease(CredentialSlot::Personal);
         let background_api = Arc::clone(&self.background_api);
@@ -3283,7 +3314,7 @@ impl Worker {
                     } else {
                         None
                     };
-                    handle(&api, &made_for_you, engine.as_deref(), request).await
+                    handle(&api, &made_for_you, &http, engine.as_deref(), request).await
                 } => result,
             };
             // Apply completion on the command loop. A late response cannot
@@ -3373,9 +3404,8 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         | ApiRequest::CheckPlaylistDuplicates {
             playlist_id: id, ..
         } => Operation::PlaylistItems(api.playlist_access(id)),
-        ApiRequest::UploadPlaylistCover { id, .. }
-        | ApiRequest::UpdatePlaylist { id, .. }
-        | ApiRequest::FollowPlaylist { id, .. } => {
+        ApiRequest::FollowPlaylist { .. } => Operation::UserData,
+        ApiRequest::UploadPlaylistCover { id, .. } | ApiRequest::UpdatePlaylist { id, .. } => {
             Operation::PlaylistMutation(api.playlist_access(id))
         }
         ApiRequest::AddToPlaylist { playlist_id, .. }
@@ -3489,6 +3519,23 @@ fn rootlist_playlist_window(
     (page, total, more)
 }
 
+fn playlist_membership(rootlist: &Rootlist, uris: &[String]) -> Vec<Option<bool>> {
+    let saved: HashSet<&str> = rootlist
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            RootlistEntry::Playlist(uri) => Some(uri.as_str()),
+            _ => None,
+        })
+        .collect();
+    uris.iter()
+        .map(|uri| {
+            uri.starts_with("spotify:playlist:")
+                .then(|| saved.contains(uri.as_str()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod playlist_library_tests {
     use super::*;
@@ -3520,6 +3567,27 @@ mod playlist_library_tests {
         assert_eq!(page, [third]);
         assert_eq!(total, 3);
         assert!(!more);
+    }
+
+    #[test]
+    fn rootlist_answers_playlist_membership_without_asking_the_shared_app() {
+        let rootlist = Rootlist {
+            entries: vec![RootlistEntry::Playlist(
+                "spotify:playlist:1234567890123456789012".into(),
+            )],
+            editable: Default::default(),
+        };
+        assert_eq!(
+            playlist_membership(
+                &rootlist,
+                &[
+                    "spotify:playlist:1234567890123456789012".into(),
+                    "spotify:playlist:2234567890123456789012".into(),
+                    "spotify:album:3234567890123456789012".into(),
+                ]
+            ),
+            [Some(true), Some(false), None]
+        );
     }
 }
 
@@ -3584,6 +3652,7 @@ async fn session_playlist_library(
 async fn handle(
     api: &ApiGateway,
     made_for_you: &crate::made_for_you::MadeForYou,
+    http: &crate::http::Http,
     engine: Option<&Engine>,
     request: ApiRequest,
 ) -> (ApiResponse, Option<ApiSource>) {
@@ -3631,6 +3700,132 @@ async fn handle(
             Ok(Err(error)) => log::warn!("playlist library session read failed: {error}"),
             Err(_) => log::warn!("playlist library session read timed out"),
         }
+    }
+    if let ApiRequest::ArtistTopTracks { id } = &request
+        && let Some(engine) = engine
+            .filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
+    {
+        match tokio::time::timeout(
+            SESSION_READ_TIMEOUT,
+            session_reads::artist_top_tracks(engine.session(), id),
+        )
+        .await
+        {
+            Ok(Ok(tracks)) => {
+                log::debug!("Spotify route operation=ArtistTopTracks source=session");
+                return (
+                    ApiResponse::ArtistTopTracks {
+                        id: id.clone(),
+                        result: Ok(tracks),
+                    },
+                    None,
+                );
+            }
+            Ok(Err(error)) => log::warn!("artist popular tracks session read failed: {error:#}"),
+            Err(_) => log::warn!("artist popular tracks session read timed out"),
+        }
+    }
+    if let ApiRequest::RelatedArtists { id } = &request
+        && let Some(engine) = engine
+            .filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
+    {
+        match tokio::time::timeout(
+            SESSION_READ_TIMEOUT,
+            crate::artist_related::related_artists(http, engine.session(), id),
+        )
+        .await
+        {
+            Ok(Ok(artists)) => {
+                log::debug!("Spotify route operation=RelatedArtists source=session");
+                return (
+                    ApiResponse::RelatedArtists {
+                        id: id.clone(),
+                        result: Ok(artists),
+                    },
+                    None,
+                );
+            }
+            Ok(Err(error)) => log::warn!("related artists session read failed: {error}"),
+            Err(_) => log::warn!("related artists session read timed out"),
+        }
+    }
+    if let ApiRequest::Recommendations {
+        seed_tracks,
+        generation,
+        ..
+    } = &request
+        && let Some(id) = seed_tracks
+            .iter()
+            .find(|id| id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        && let Some(engine) = engine
+            .filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
+    {
+        let station = format!("spotify:station:track:{id}");
+        match tokio::time::timeout(
+            RADIO_TIMEOUT,
+            session_reads::station(engine.session(), &station),
+        )
+        .await
+        {
+            Ok(Ok(mut tracks)) => {
+                tracks.truncate(20);
+                log::debug!("Spotify route operation=Recommendations source=session");
+                return (
+                    ApiResponse::Recommendations {
+                        generation: *generation,
+                        result: Ok(tracks),
+                    },
+                    None,
+                );
+            }
+            Ok(Err(error)) => log::warn!("recommended radio session read failed: {error:#}"),
+            Err(_) => log::warn!("recommended radio session read timed out"),
+        }
+    }
+    if let ApiRequest::Contains { uris } = &request
+        && uris.iter().any(|uri| uri.starts_with("spotify:playlist:"))
+        && let Some(engine) = engine
+            .filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
+        && let Ok(Ok(rootlist)) =
+            tokio::time::timeout(SESSION_READ_TIMEOUT, engine.rootlist()).await
+    {
+        let membership = playlist_membership(&rootlist, uris);
+        let other: Vec<String> = uris
+            .iter()
+            .zip(&membership)
+            .filter_map(|(uri, value)| value.is_none().then_some(uri.clone()))
+            .collect();
+        let result = if other.is_empty() {
+            Ok(membership.into_iter().flatten().collect())
+        } else {
+            match api.client_for(Operation::UserData).await {
+                Ok(client) => client.contains(&other).await.and_then(|answers| {
+                    if answers.len() != other.len() {
+                        return Err(ApiError::Decode(
+                            "Spotify returned an incomplete library membership list".into(),
+                        ));
+                    }
+                    let mut answers = answers.into_iter();
+                    Ok(membership
+                        .into_iter()
+                        .map(|value| value.unwrap_or_else(|| answers.next().unwrap_or(false)))
+                        .collect())
+                }),
+                Err(error) => Err(error),
+            }
+        };
+        let expired = match &result {
+            Err(ApiError::SignInExpired { api_source }) => Some(*api_source),
+            _ => None,
+        };
+        log::debug!("Spotify route operation=PlaylistContains source=session");
+        return (
+            ApiResponse::Contains {
+                uris: uris.clone(),
+                result,
+            },
+            expired,
+        );
     }
     let operation = operation_for(api, &request);
     // A session whose long-lived connection has dropped still answers over
@@ -5647,6 +5842,35 @@ mod authorization_tests {
     }
 
     #[test]
+    fn startup_restores_the_personal_grant_before_the_shared_fallback() {
+        let (runtime, mut worker, _) = worker("personal-first-restore");
+        let _entered = runtime.enter();
+        worker.restore_spotify_grants();
+        assert_eq!(
+            worker.api.state(ApiSource::Shared),
+            SessionState::Unavailable
+        );
+        assert_eq!(
+            worker.api.state(ApiSource::Personal),
+            SessionState::Authorizing
+        );
+        assert!(!worker.restore_pending[CredentialSlot::Shared.index()]);
+        worker.on_credentials_restored(
+            CredentialSlot::Personal,
+            worker.credentials.lease(CredentialSlot::Personal),
+            Ok(crate::credentials::Loaded {
+                grant: None,
+                warning: None,
+            }),
+        );
+        assert_eq!(
+            worker.api.state(ApiSource::Shared),
+            SessionState::Authorizing
+        );
+        assert!(worker.restore_pending[CredentialSlot::Shared.index()]);
+    }
+
+    #[test]
     fn cover_confirmation_checks_the_largest_image_without_spotify_credentials() {
         use std::io::{Read, Write};
         for matches in [false, true] {
@@ -5771,8 +5995,22 @@ mod authorization_tests {
                 .unwrap();
             worker.restore_pending[slot.index()] = true;
             let loaded = runtime.block_on(lease.load());
-            worker.on_credentials_restored(slot, lease.clone(), loaded);
+            {
+                let _entered = runtime.enter();
+                worker.on_credentials_restored(slot, lease.clone(), loaded);
+            }
             assert!(!worker.restore_pending[slot.index()]);
+            if slot == CredentialSlot::Personal {
+                assert!(worker.restore_pending[CredentialSlot::Shared.index()]);
+                worker.on_credentials_restored(
+                    CredentialSlot::Shared,
+                    worker.credentials.lease(CredentialSlot::Shared),
+                    Ok(crate::credentials::Loaded {
+                        grant: None,
+                        warning: None,
+                    }),
+                );
+            }
             assert!(worker.web_tokens[slot.index()].is_none());
             assert!(!worker.signed_in);
             let emitted: Vec<_> = events.try_iter().collect();

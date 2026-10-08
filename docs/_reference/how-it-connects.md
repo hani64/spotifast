@@ -9,17 +9,19 @@ nav_order: 1
 Spotifast uses separate credentials for Web API access, a personal app, and
 local playback:
 
-1. **The shared Web API app** keeps full catalogue and playlist coverage.
+1. **The shared Web API app** is used when no personal grant is available and
+   as a fallback for requests the personal app and playback session cannot
+   answer. A configured personal grant is restored first, so the shared grant
+   is not verified on every launch.
 2. **Your optional personal Web API app** handles supported playback, library,
-   catalog, catalogue search, playlist creation, and owned or collaborative
-   playlist requests without using the shared app's quota. The playlist half
-   of a search stays on the shared app so Spotify-owned results are not filtered
-   out. When local playback is connected, the playlist library instead reads
-   the complete rootlist and playlist headers through that session. The shared
-   app remains a fallback when the session cannot answer. Home's **Made for you**
+   catalog, search (including playlists), playlist creation and supported
+   playlist requests without using the shared app's quota. Spotify may omit
+   Spotify-owned playlists from personal-app search results. When local playback
+   is connected, the playlist library instead reads the complete rootlist and
+   playlist headers through that session. Home's **Made for you**
    shelf reads the account's actual personalized section over the playback
-   session instead of performing four shared-app playlist searches. Both Web
-   API grants must verify as the same Spotify account.
+   session instead of performing four shared-app playlist searches. When both
+   Web API grants are used, they must verify as the same Spotify account.
 3. **Local playback** uses
    [librespot](https://github.com/librespot-org/librespot). It needs one more
    browser approval and keeps an independent reusable credential. Spotify Premium
@@ -32,7 +34,9 @@ local playback:
    or persisted for this shelf. Its response is kept in memory for ten minutes
    per account; a manual refresh bypasses that cache but respects any
    `Retry-After` cooldown. A failed refresh keeps previously shown cards.
-   If playback is not set up, the shelf offers a retry after setup. This
+   The session also reads artist popular tracks and related artists. Suggested
+   songs on Home use radio seeded by one top track rather than the Web API's
+   multi-seed recommendations. If playback is not set up, the shelf offers a retry after setup. This
    private response can change without notice. Radio pages come only from
    this session: the Web API has no stations. Opening one resolves the
    station and reads its songs' details in one batched request.
@@ -71,20 +75,15 @@ and Omarchy Spotify. Spotify divides its quota among all users. A personal app
 adds a separate Development Mode quota. See
 [Use a Personal Spotify App](/make-it-even-faster/).
 
-Since 0.8.0, a search runs as two requests when a
-personal app is ready: songs, artists, albums, podcasts, and episodes on the
-personal app, and playlists on the shared app. This moves catalogue search off the quota Spotify divides among every user
-of the shared app. Each half is shown the moment it
-arrives, so a shared app waiting out a rate limit no longer holds up the songs,
-and playlists appear underneath when that wait ends. A half belonging to an
-earlier search is discarded rather than shown beside a newer one. A newer or cleared search cancels the previous requests, including waits
-for shared access. If either half fails, the successful results remain usable
-with an error for the failed part. A new query starts a fresh result set; old
-songs never appear under its name. The loading indicator remains until both
-parts finish. A personal app answers
-with ten results for each type where the shared app answers with twenty, because
-Development Mode rejects the larger page. Without a personal app, one request
-still asks for all six types and nothing about a search changes.
+When a personal app is ready, search runs as two requests against that app:
+one for songs, artists, albums, podcasts and episodes, and one for playlists.
+Each half is shown when it arrives. Results from an earlier search are
+discarded, and a newer or cleared search cancels the previous requests. If
+either half fails, the successful results remain usable with an error for the
+failed part. The loading indicator remains until both parts finish. A personal
+app answers with ten results for each type where the shared app answers with
+twenty, because Development Mode rejects the larger page. Without a personal
+app, one request still asks for all six types.
 
 Since 0.8.0, verified Premium accounts using shared access see a
 one-time introduction to that option. Setup and dismissal are remembered in
@@ -100,7 +99,7 @@ When local playback is connected, the playlist sidebar gets its entries from
 the rootlist and resolves each page's names and covers through the session.
 This avoids the shared Web API app's playlist-library quota and includes
 Spotify-owned playlists a personal app might omit. A failed session read falls
-back to the shared Web API app. Session headers may lack public visibility,
+back to the personal app if ready, or the shared app otherwise. Session headers may lack public visibility,
 owner display names or a generated cover mosaic that the Web API supplies.
 
 Since 0.9.0, a playlist-folder and invitation-permission read requested

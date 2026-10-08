@@ -33,6 +33,12 @@ playlist names through the shared Web API app. Enable local playback to load
 the shelf; Spotify can change this private Home response independently of the
 public Web API.
 
+With a personal Spotify app configured, Spotifast restores it before the
+shared grant and sends supported account, library, catalogue and search
+requests through it. The playback session supplies the complete saved playlist
+list and artist popular tracks. Spotify's private session responses can change;
+features they supply may be unavailable if the session cannot answer.
+
 ![Spotifast Home with the playlist library, recommendations, queue, and player visible](docs/screenshot.png)
 
 <details>

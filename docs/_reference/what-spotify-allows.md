@@ -24,9 +24,9 @@ Spotifast uses the Web API for:
 - **Playlists:** reading, creating, renaming, changing the description and
   visibility, adding and removing songs, reordering songs, and following and
   unfollowing. Custom playlist cover uploads are available since 0.9.0.
-- **Catalogue:** albums, artists, tracks, shows, episodes, search, and
-  recommendations. Artist pages include top tracks, releases, and related
-  artists.
+- **Catalogue:** albums, artists, tracks, shows, episodes and search. Older
+  shared grants can also answer recommendations, artist top tracks and related
+  artists; personal Development Mode grants cannot.
 - **Playback control:** listing devices, transferring playback, play, pause,
   next, previous, seek, shuffle, repeat, volume, and reading or adding to the
   queue.
@@ -34,12 +34,12 @@ Spotifast uses the Web API for:
 Users of the default app share Spotify's quota. Spotifast limits heavy
 requests and pauses a session when Spotify sends a `Retry-After` response.
 
-Spotify also limits apps created since November 2024. These apps cannot access
-Spotify-owned playlists, related artists, recommendations, or audio features.
-This is why a personal app cannot handle every request. When local playback
-is connected, the playlist library is listed and read over the librespot
-session, including Spotify-owned playlists. Without that session, library
-listing stays on the shared app. Playlists other people own, and every
+Spotify also limits personal Development Mode apps. Their playlist search and
+library answers may omit Spotify-owned playlists, and they cannot use related
+artists, recommendations or artist top tracks. When local playback is
+connected, the playlist library is listed and read over the librespot session,
+including Spotify-owned playlists. Without that session, library listing uses
+the personal app when ready. Playlists other people own, and every
 playlist when there is no personal app, are also read over the session when
 local playback is signed in. See [How It Connects](/how-it-connects/).
 
@@ -76,6 +76,11 @@ clients. Spotifast uses its session for:
   request uses the playback session and an already verified Web API grant;
   it does not spend the shared app's playlist-search quota. Spotify may change
   this response without a Web API version change.
+- **Artist popular tracks** through the artist context's first page, and
+  **related artists** through the artist overview used by Psst. The latter is
+  a private Spotify response and can change without notice.
+- **Suggested songs** through one top track's radio station. This differs from
+  the Web API's multi-seed recommendations.
 - **Radio and autoplay** through Spotify's context resolver: stations seeded
   by a song, playlist, album, or artist. Each resolution is a fresh mix of 50
   songs, so a radio page plays the songs it shows rather than asking again.

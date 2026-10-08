@@ -157,7 +157,26 @@ fn page(items: Vec<PlaylistItem>, total: u32, offset: u32, limit: u32) -> Page<P
 pub async fn station(session: &Session, station: &str) -> anyhow::Result<Vec<Track>> {
     let context = session.spclient().get_context(station).await?;
     let uris = station_songs(&context);
-    anyhow::ensure!(!uris.is_empty(), "Spotify has no songs for this radio");
+    tracks_for_uris(session, uris).await
+}
+
+/// Artist contexts begin with Spotify's popular songs. Later pages contain
+/// album material, so only the first page belongs in the Popular list.
+pub async fn artist_top_tracks(session: &Session, id: &str) -> anyhow::Result<Vec<Track>> {
+    let context = session
+        .spclient()
+        .get_context(&format!("spotify:artist:{id}"))
+        .await?;
+    tracks_for_uris(session, artist_popular_uris(context)).await
+}
+
+fn artist_popular_uris(mut context: librespot_protocol::context::Context) -> Vec<SpotifyUri> {
+    context.pages.truncate(1);
+    station_songs(&context)
+}
+
+async fn tracks_for_uris(session: &Session, uris: Vec<SpotifyUri>) -> anyhow::Result<Vec<Track>> {
+    anyhow::ensure!(!uris.is_empty(), "Spotify has no songs for this context");
     let found = metadata(session, uris.iter())
         .await
         .map_err(|failure| match failure {
@@ -1325,5 +1344,35 @@ mod tests {
                 "spotify:track:4uLU6hMCjMI75M1A2tKUQC",
             ]
         );
+    }
+
+    #[test]
+    fn artist_popular_tracks_stop_before_the_album_page() {
+        use librespot_protocol::context::Context;
+        use librespot_protocol::context_page::ContextPage;
+        use librespot_protocol::context_track::ContextTrack;
+        let track = |uri: &str| ContextTrack {
+            uri: Some(uri.into()),
+            ..Default::default()
+        };
+        let context = Context {
+            pages: vec![
+                ContextPage {
+                    tracks: vec![track("spotify:track:3JA9Jsuxr4xgHXEawAdCp4")],
+                    ..Default::default()
+                },
+                ContextPage {
+                    tracks: vec![track("spotify:track:4uLU6hMCjMI75M1A2tKUQC")],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let songs = artist_popular_uris(context);
+        assert_eq!(
+            songs[0].to_uri().unwrap(),
+            "spotify:track:3JA9Jsuxr4xgHXEawAdCp4"
+        );
+        assert_eq!(songs.len(), 1);
     }
 }
